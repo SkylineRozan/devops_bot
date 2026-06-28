@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  db_main:
+    build:
+      context: ./db
+    container_name: db_main_container
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_main_data:/var/lib/postgresql/data
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  db_replica:
+    build:
+      context: ./db_repl
+    container_name: db_replica_container
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_password}
+    ports:
+      - "5433:5432"
+    volumes:
+      - db_replica_data:/var/lib/postgresql/data
+    networks:
+      - app_network
+    depends_on:
+      db_main:
+        condition: service_healthy
+
+  bot:
+    build:
+      context: ./bot
+    container_name: vk_bot_container
+    environment:
+      VK_TOKEN: ${VK_TOKEN}
+      GROUP_ID: ${GROUP_ID}
+      DB_USER: ${DB_USER:-db_admin}
+      DB_PASSWORD: ${DB_PASSWORD:-db_admin_password}
+      DB_HOST: db_main
+      DB_PORT: 5432
+      DB_DATABASE: ${DB_DATABASE:-mydb}
+      DB_REPL_USER: ${DB_REPL_USER:-repl_user}
+      DB_REPL_PASSWORD: ${DB_REPL_PASSWORD:-repl_password}
+      DB_REPL_HOST: db_replica
+      DB_REPL_PORT: 5432
+      DOCKER_MODE: "true"
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      db_main:
+        condition: service_healthy
+      db_replica:
+        condition: service_started
+    networks:
+      - app_network
+    stdin_open: true
+    tty: true
+
+volumes:
+  db_main_data:
+  db_replica_data:
+
+networks:
+  app_network:
+    driver: bridge
