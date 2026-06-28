@@ -5,6 +5,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     postgresql-client \
     procps \
+    net-tools \
+    iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

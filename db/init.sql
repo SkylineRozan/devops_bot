@@ -34,6 +34,11 @@ INSERT INTO PHONE (Phone) VALUES
     ('+79031234567'),
     ('+79169876543');
 
+-- Права для db_admin
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO db_admin;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO db_admin;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO db_admin;
+
 -- Настройки репликации
 ALTER SYSTEM SET wal_level = replica;
 ALTER SYSTEM SET max_wal_senders = 10;
