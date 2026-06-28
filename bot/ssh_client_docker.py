@@ -50,45 +50,45 @@ class SSHClient:
 
     def get_release(self): return "🐳 Docker контейнер (релиз недоступен)"
     def get_uname(self): return "🐳 Docker контейнер (uname недоступен)"
-    
+
     def get_uptime(self):
         import subprocess
         r = subprocess.run(['uptime'], capture_output=True, text=True)
         return r.stdout if r.returncode == 0 else "Н/Д"
-    
+
     def get_df(self):
         import subprocess
         r = subprocess.run(['df', '-h'], capture_output=True, text=True)
         return r.stdout if r.returncode == 0 else "Н/Д"
-    
+
     def get_free(self):
         import subprocess
         r = subprocess.run(['free', '-h'], capture_output=True, text=True)
         return r.stdout if r.returncode == 0 else "Н/Д"
-    
+
     def get_mpstat(self):
         import subprocess
         r = subprocess.run(['top', '-bn1', '|', 'head', '-n', '5'], capture_output=True, text=True, shell=True)
         return r.stdout if r.returncode == 0 else "Н/Д"
-    
+
     def get_w(self):
         import subprocess
         r = subprocess.run(['w'], capture_output=True, text=True)
         return r.stdout if r.returncode == 0 else "Н/Д"
-    
+
     def get_auths(self): return "🐳 Docker контейнер (last недоступен)"
     def get_critical(self): return "🐳 Docker контейнер (journalctl недоступен)"
-    
+
     def get_ps(self):
         import subprocess
         r = subprocess.run(['ps', 'aux'], capture_output=True, text=True)
         return r.stdout[:2000] if r.returncode == 0 else "Н/Д"
-    
+
     def get_ss(self):
         import subprocess
         r = subprocess.run(['ss', '-tulpn'], capture_output=True, text=True)
         return r.stdout if r.returncode == 0 else "Н/Д"
-    
+
     def get_apt_list(self, package=None, timeout=120): return "🐳 Docker контейнер (apt недоступен)"
     def get_services(self): return "🐳 Docker контейнер (systemctl недоступен)"
 
@@ -114,10 +114,12 @@ class SSHClient:
     def get_phones_from_db(self): return self.execute_db_command("SELECT ID, Phone FROM PHONE ORDER BY ID DESC;")
 
     def insert_email(self, email: str):
-        return self.execute_db_command(f"INSERT INTO EMAIL (Email) VALUES ('{email.replace(chr(39), chr(39)+chr(39))}') ON CONFLICT (Email) DO NOTHING RETURNING ID;")
+        escaped = email.replace("'", "''")
+        return self.execute_db_command(f"INSERT INTO EMAIL (Email) VALUES ('{escaped}') ON CONFLICT (Email) DO NOTHING RETURNING ID;")
 
     def insert_phone(self, phone: str):
-        return self.execute_db_command(f"INSERT INTO PHONE (Phone) VALUES ('{phone.replace(chr(39), chr(39)+chr(39))}') ON CONFLICT (Phone) DO NOTHING RETURNING ID;")
+        escaped = phone.replace("'", "''")
+        return self.execute_db_command(f"INSERT INTO PHONE (Phone) VALUES ('{escaped}') ON CONFLICT (Phone) DO NOTHING RETURNING ID;")
 
     def insert_emails_batch(self, emails: List[str]) -> tuple:
         s = 0
