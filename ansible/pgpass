@@ -1,0 +1,4 @@
+localhost:5432:mydb:db_admin:db_admin_password
+localhost:5432:mydb:repl_user:repl_password
+# Замените IP на актуальные
+192.168.133.135:5432:*:repl_user:repl_password

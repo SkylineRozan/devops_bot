@@ -1,0 +1,371 @@
+---
+- name: Развертывание PostgreSQL Master
+  hosts: db_master
+  become: yes
+  vars:
+    pg_version: "14"
+    db_name: "mydb"
+    db_user: "db_admin"
+    db_password: "db_admin_password"
+    repl_user: "repl_user"
+    repl_password: "repl_password"
+    listen_addresses: "*"
+
+  tasks:
+    - name: Установка необходимых пакетов
+      apt:
+        name: [gnupg, wget, curl, ca-certificates, sudo]
+        state: present
+        update_cache: yes
+
+    - name: Добавление репозитория PostgreSQL
+      shell: |
+        echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list
+        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
+      args:
+        creates: /etc/apt/sources.list.d/pgdg.list
+
+    - name: Установка PostgreSQL
+      apt:
+        name:
+          - "postgresql-{{ pg_version }}"
+          - "postgresql-client-{{ pg_version }}"
+        state: present
+        update_cache: yes
+
+    - name: Остановка PostgreSQL для настройки
+      systemd:
+        name: "postgresql"
+        state: stopped
+
+    - name: Копирование конфигурации pg_hba.conf
+      copy:
+        src: pg_hba.conf
+        dest: "/etc/postgresql/{{ pg_version }}/main/pg_hba.conf"
+        owner: postgres
+        group: postgres
+        mode: '0640'
+
+    - name: Настройка postgresql.conf для репликации
+      lineinfile:
+        path: "/etc/postgresql/{{ pg_version }}/main/postgresql.conf"
+        regexp: "^{{ item.key }}"
+        line: "{{ item.key }} = '{{ item.value }}'"
+        state: present
+      loop:
+        - { key: "listen_addresses", value: "{{ listen_addresses }}" }
+        - { key: "wal_level", value: "replica" }
+        - { key: "max_wal_senders", value: "10" }
+        - { key: "wal_keep_size", value: "64" }
+        - { key: "wal_log_hints", value: "on" }
+
+    - name: Запуск PostgreSQL
+      systemd:
+        name: "postgresql"
+        state: started
+        enabled: yes
+
+    - name: Ожидание готовности PostgreSQL
+      wait_for:
+        port: 5432
+        host: localhost
+        delay: 5
+        timeout: 30
+
+    - name: Создание пользователя БД
+      become_user: postgres
+      postgresql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        role_attr_flags: CREATEDB,LOGIN
+      ignore_errors: yes
+
+    - name: Создание пользователя для репликации
+      become_user: postgres
+      postgresql_user:
+        name: "{{ repl_user }}"
+        password: "{{ repl_password }}"
+        role_attr_flags: REPLICATION,LOGIN
+      ignore_errors: yes
+
+    - name: Создание базы данных
+      become_user: postgres
+      postgresql_db:
+        name: "{{ db_name }}"
+        owner: "{{ db_user }}"
+      ignore_errors: yes
+
+    - name: Копирование SQL-скрипта инициализации
+      copy:
+        content: |
+          \c {{ db_name }}
+          CREATE TABLE IF NOT EXISTS EMAIL (ID SERIAL PRIMARY KEY, Email VARCHAR(255) UNIQUE NOT NULL);
+          CREATE TABLE IF NOT EXISTS PHONE (ID SERIAL PRIMARY KEY, Phone VARCHAR(50) UNIQUE NOT NULL);
+          INSERT INTO EMAIL (Email) VALUES ('test1@example.com'), ('test2@example.com'), ('admin@test.org') ON CONFLICT (Email) DO NOTHING;
+          INSERT INTO PHONE (Phone) VALUES ('+79161234567'), ('+79031234567'), ('+79169876543') ON CONFLICT (Phone) DO NOTHING;
+          GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {{ db_user }};
+          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {{ db_user }};
+          GRANT ALL ON SCHEMA public TO {{ db_user }};
+        dest: /tmp/init_db.sql
+        owner: postgres
+        group: postgres
+        mode: '0644'
+
+    - name: Инициализация таблиц и данных
+      become_user: postgres
+      shell: "psql -f /tmp/init_db.sql"
+      ignore_errors: yes
+
+    - name: Перезапуск PostgreSQL для применения настроек репликации
+      systemd:
+        name: "postgresql"
+        state: restarted
+
+    - name: Повторное ожидание готовности PostgreSQL
+      wait_for:
+        port: 5432
+        host: localhost
+        delay: 5
+        timeout: 30
+
+- name: Развертывание PostgreSQL Replica
+  hosts: db_replica
+  become: yes
+  vars:
+    pg_version: "14"
+    master_host: "192.168.133.135"
+    repl_user: "repl_user"
+    repl_password: "repl_password"
+
+  tasks:
+    - name: Установка необходимых пакетов
+      apt:
+        name: [gnupg, wget, curl, ca-certificates, sudo]
+        state: present
+        update_cache: yes
+
+    - name: Добавление репозитория PostgreSQL
+      shell: |
+        echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list
+        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
+      args:
+        creates: /etc/apt/sources.list.d/pgdg.list
+
+    - name: Установка PostgreSQL
+      apt:
+        name:
+          - "postgresql-{{ pg_version }}"
+          - "postgresql-client-{{ pg_version }}"
+        state: present
+        update_cache: yes
+
+    - name: Остановка PostgreSQL
+      systemd:
+        name: "postgresql"
+        state: stopped
+
+    - name: Очистка данных PostgreSQL
+      file:
+        path: "/var/lib/postgresql/{{ pg_version }}/main"
+        state: absent
+
+    - name: Проверка доступности мастера
+      wait_for:
+        port: 5432
+        host: "{{ master_host }}"
+        delay: 5
+        timeout: 60
+
+    - name: Создание резервной копии с мастера
+      become_user: postgres
+      environment:
+        PGPASSWORD: "{{ repl_password }}"
+      shell: |
+        pg_basebackup -h {{ master_host }} -D /var/lib/postgresql/{{ pg_version }}/main -U {{ repl_user }} -P -R --slot=replica_slot -C
+      args:
+        creates: "/var/lib/postgresql/{{ pg_version }}/main/PG_VERSION"
+
+    - name: Копирование pg_hba.conf на реплику
+      copy:
+        src: pg_hba.conf
+        dest: "/etc/postgresql/{{ pg_version }}/main/pg_hba.conf"
+        owner: postgres
+        group: postgres
+        mode: '0640'
+
+    - name: Настройка hot_standby на реплике
+      lineinfile:
+        path: "/etc/postgresql/{{ pg_version }}/main/postgresql.conf"
+        regexp: "^hot_standby"
+        line: "hot_standby = on"
+        state: present
+
+    - name: Запуск PostgreSQL на реплике
+      systemd:
+        name: "postgresql"
+        state: started
+        enabled: yes
+
+    - name: Проверка статуса репликации
+      become_user: postgres
+      shell: "psql -c 'SELECT pg_is_in_recovery();'"
+      register: replica_status
+      ignore_errors: yes
+
+    - name: Вывод статуса репликации
+      debug:
+        msg: "Статус репликации: {{ replica_status.stdout }}"
+
+- name: Настройка сервера бота
+  hosts: bot_server
+  become: yes
+  vars:
+    repo_url: "https://github.com/SkylineRozan/devops_bot.git"
+    branch: "ansible"
+    bot_dir: "/opt/vk_bot"
+    vk_token: "{{ lookup('env', 'VK_TOKEN') }}"
+    group_id: "{{ lookup('env', 'GROUP_ID') }}"
+    db_host: "192.168.133.135"
+    db_port: "5432"
+    db_name: "mydb"
+    db_user: "db_admin"
+    db_password: "db_admin_password"
+    db_repl_host: "192.168.133.137"
+    db_repl_port: "5432"
+    db_repl_user: "repl_user"
+    db_repl_password: "repl_password"
+    rm_host: "192.168.133.135"
+    rm_port: "22"
+    rm_user: "root"
+    rm_password: "your_ssh_password"
+
+  tasks:
+    - name: Установка необходимых пакетов
+      apt:
+        name:
+          - python3
+          - python3-pip
+          - python3-venv
+          - git
+          - openssh-client
+          - postgresql-client
+          - net-tools
+          - procps
+        state: present
+        update_cache: yes
+
+    - name: Клонирование репозитория с GitHub
+      git:
+        repo: "{{ repo_url }}"
+        dest: "{{ bot_dir }}"
+        version: "{{ branch }}"
+        force: yes
+      ignore_errors: yes
+
+    - name: Проверка наличия склонированного репозитория
+      stat:
+        path: "{{ bot_dir }}/bot/bot.py"
+      register: repo_check
+
+    - name: Вывод информации о репозитории
+      debug:
+        msg: "{% if repo_check.stat.exists %}Репозиторий успешно склонирован{% else %}ОШИБКА: Репозиторий не склонирован!{% endif %}"
+
+    - name: Создание виртуального окружения Python
+      command: python3 -m venv {{ bot_dir }}/venv
+      args:
+        creates: "{{ bot_dir }}/venv/bin/python"
+
+    - name: Обновление pip в виртуальном окружении
+      pip:
+        name: pip
+        state: latest
+        virtualenv: "{{ bot_dir }}/venv"
+
+    - name: Установка Python-зависимостей
+      pip:
+        requirements: "{{ bot_dir }}/bot/requirements.txt"
+        virtualenv: "{{ bot_dir }}/venv"
+      when: repo_check.stat.exists
+
+    - name: Создание директории для логов
+      file:
+        path: "{{ bot_dir }}/bot/logs"
+        state: directory
+        mode: '0755'
+
+    - name: Создание .env файла с настройками
+      copy:
+        content: |
+          VK_TOKEN={{ vk_token }}
+          GROUP_ID={{ group_id }}
+          DB_HOST={{ db_host }}
+          DB_PORT={{ db_port }}
+          DB_DATABASE={{ db_name }}
+          DB_USER={{ db_user }}
+          DB_PASSWORD={{ db_password }}
+          DB_REPL_HOST={{ db_repl_host }}
+          DB_REPL_PORT={{ db_repl_port }}
+          DB_REPL_USER={{ db_repl_user }}
+          DB_REPL_PASSWORD={{ db_repl_password }}
+          RM_HOST={{ rm_host }}
+          RM_PORT={{ rm_port }}
+          RM_USER={{ rm_user }}
+          RM_PASSWORD={{ rm_password }}
+        dest: "{{ bot_dir }}/bot/.env"
+        mode: '0600'
+
+    - name: Создание systemd-сервиса для VK бота
+      copy:
+        content: |
+          [Unit]
+          Description=VK Bot Service
+          After=network.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=root
+          WorkingDirectory={{ bot_dir }}/bot
+          Environment=PATH={{ bot_dir }}/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          Environment=PYTHONUNBUFFERED=1
+          Environment=HOME=/root
+          ExecStart={{ bot_dir }}/venv/bin/python {{ bot_dir }}/bot/bot.py
+          Restart=always
+          RestartSec=10
+          StandardOutput=append:{{ bot_dir }}/bot/logs/bot_stdout.log
+          StandardError=append:{{ bot_dir }}/bot/logs/bot_stderr.log
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/vkbot.service
+        mode: '0644'
+
+    - name: Перезагрузка systemd и запуск сервиса
+      systemd:
+        name: vkbot
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Проверка статуса сервиса бота
+      systemd:
+        name: vkbot
+      register: bot_service_status
+
+    - name: Вывод статуса бота
+      debug:
+        msg: "Статус сервиса VK бота: {{ bot_service_status.status.ActiveState }}"
+
+    - name: Ожидание запуска бота
+      wait_for:
+        timeout: 10
+
+    - name: Проверка логов бота
+      shell: "tail -n 20 {{ bot_dir }}/bot/logs/bot.log 2>/dev/null || echo 'Лог-файл еще не создан'"
+      register: bot_logs
+      ignore_errors: yes
+
+    - name: Вывод логов бота
+      debug:
+        msg: "Последние логи бота:\n{{ bot_logs.stdout }}"
