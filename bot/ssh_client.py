@@ -122,10 +122,12 @@ class SSHClient:
     def get_phones_from_db(self): return self.execute_db_command("SELECT ID, Phone FROM PHONE ORDER BY ID DESC;")
 
     def insert_email(self, email: str):
-        return self.execute_db_command(f"INSERT INTO EMAIL (Email) VALUES ('{email.replace(chr(39), chr(39)+chr(39))}') ON CONFLICT (Email) DO NOTHING RETURNING ID;")
+        escaped = email.replace("'", "''")
+        return self.execute_db_command(f"INSERT INTO EMAIL (Email) VALUES ('{escaped}') ON CONFLICT (Email) DO NOTHING RETURNING ID;")
 
     def insert_phone(self, phone: str):
-        return self.execute_db_command(f"INSERT INTO PHONE (Phone) VALUES ('{phone.replace(chr(39), chr(39)+chr(39))}') ON CONFLICT (Phone) DO NOTHING RETURNING ID;")
+        escaped = phone.replace("'", "''")
+        return self.execute_db_command(f"INSERT INTO PHONE (Phone) VALUES ('{escaped}') ON CONFLICT (Phone) DO NOTHING RETURNING ID;")
 
     def insert_emails_batch(self, emails: List[str]) -> tuple:
         s = 0
