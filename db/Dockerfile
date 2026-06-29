@@ -1,6 +1,7 @@
 FROM postgres:14
 
 COPY init.sql /docker-entrypoint-initdb.d/
+COPY configure_replication.sh /docker-entrypoint-initdb.d/
 
 RUN echo "wal_level = replica" >> /usr/share/postgresql/postgresql.conf.sample && \
     echo "max_wal_senders = 10" >> /usr/share/postgresql/postgresql.conf.sample && \

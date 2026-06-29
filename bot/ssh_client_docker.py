@@ -67,9 +67,14 @@ class SSHClient:
         return r.stdout if r.returncode == 0 else "Н/Д"
 
     def get_mpstat(self):
-        import subprocess
-        r = subprocess.run(['top', '-bn1', '|', 'head', '-n', '5'], capture_output=True, text=True, shell=True)
-        return r.stdout if r.returncode == 0 else "Н/Д"
+        try:
+            with open('/proc/loadavg', 'r') as f:
+                load = f.read().strip()
+            with open('/proc/cpuinfo', 'r') as f:
+                cpus = len([l for l in f if l.startswith('processor')])
+            return f"Load average: {load}\nCPU cores: {cpus}"
+        except:
+            return "Н/Д"
 
     def get_w(self):
         import subprocess
@@ -93,60 +98,47 @@ class SSHClient:
     def get_services(self): return "🐳 Docker контейнер (systemctl недоступен)"
 
     def get_replication_logs(self):
-        output = "📋 Логи репликации PostgreSQL:\n\n"
+        output = "📋 ЛОГИ РЕПЛИКАЦИИ PostgreSQL\n"
+        output += "=" * 40 + "\n\n"
         
-        import subprocess
-        try:
-            logs = subprocess.run(
-                ['docker', 'logs', 'db_main_container'], 
-                capture_output=True, text=True, timeout=10
-            )
-            if logs.stdout:
-                lines = logs.stdout.split('\n')
-                
-                startup_lines = []
-                repl_lines = []
-                checkpoint_lines = []
-                other_lines = []
-                
-                for line in lines:
-                    lower = line.lower()
-                    if 'database system' in lower:
-                        startup_lines.append(line)
-                    elif any(w in lower for w in ['replication', 'walsender', 'standby', 'wal receiver', 'start_replication']):
-                        repl_lines.append(line)
-                    elif 'checkpoint' in lower:
-                        checkpoint_lines.append(line)
-                    elif any(w in lower for w in ['shut down', 'ready to accept', 'automatic recovery', 'interrupted']):
-                        other_lines.append(line)
-                
-                if startup_lines:
-                    output += "🟢 ЗАПУСК И СТАТУС СИСТЕМЫ:\n"
-                    output += "\n".join(startup_lines[-20:]) + "\n\n"
-                
-                if repl_lines:
-                    output += "🔄 ОПЕРАЦИИ РЕПЛИКАЦИИ:\n"
-                    output += "\n".join(repl_lines[-20:]) + "\n\n"
-                
-                if checkpoint_lines:
-                    output += "💾 КОНТРОЛЬНЫЕ ТОЧКИ:\n"
-                    output += "\n".join(checkpoint_lines[-20:]) + "\n\n"
-                
-                if other_lines:
-                    output += "📌 ДРУГИЕ СОБЫТИЯ:\n"
-                    output += "\n".join(other_lines[-20:]) + "\n\n"
-        except Exception as e:
-            output += f"Не удалось получить логи контейнера: {e}\n\n"
+        sql4 = "SELECT pid, usename, application_name, client_addr, state, write_lag, flush_lag, replay_lag FROM pg_stat_replication;"
+        result4 = self.execute_db_command(sql4)
         
-        sql1 = "SELECT usename, application_name, client_addr, state, sync_state, pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) as lag_bytes FROM pg_stat_replication;"
-        result1 = self.execute_db_command(sql1)
-        if result1 and result1.strip() and "(нет данных)" not in result1:
-            output += f"🔄 Активные подключения:\n{result1}\n"
+        if result4 and result4.strip() and "(нет данных)" not in result4:
+            output += "🔄 СТРИМИНГ РЕПЛИКАЦИИ:\n"
+            output += "────────────────────────────────────────\n"
+            output += result4 + "\n"
+        else:
+            output += "🔄 Стриминг не активен\n\n"
         
-        sql2 = "SELECT slot_name, slot_type, active FROM pg_replication_slots;"
+        sql2 = "SELECT slot_name, slot_type, active, restart_lsn FROM pg_replication_slots;"
         result2 = self.execute_db_command(sql2)
+        
         if result2 and result2.strip() and "(нет данных)" not in result2:
-            output += f"🔌 Слоты репликации:\n{result2}\n"
+            output += "🔌 СЛОТЫ РЕПЛИКАЦИИ:\n"
+            output += "────────────────────────────────────────\n"
+            output += result2 + "\n"
+        
+        sql3 = "SELECT pg_current_wal_lsn() as current_wal, pg_last_wal_receive_lsn() as last_receive, pg_last_wal_replay_lsn() as last_replay;"
+        result3 = self.execute_db_command(sql3)
+        if result3 and result3.strip():
+            output += "📊 WAL ПОЗИЦИИ:\n"
+            output += "────────────────────────────────────────\n"
+            output += result3 + "\n\n"
+        
+        try:
+            conn = self.get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT pg_is_in_recovery();")
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            if row and row[0] == False:
+                output += "✅ Сервер: MASTER (чтение и запись)\n"
+            elif row and row[0] == True:
+                output += "🔄 Сервер: REPLICA (только чтение)\n"
+        except:
+            pass
         
         return output
 
