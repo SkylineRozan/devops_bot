@@ -1,11 +1,11 @@
 [db_master]
-db-master ansible_host=192.168.133.135 ansible_user=root ansible_password=1
+db-master ansible_host=192.168.133.135 ansible_user=root ansible_ssh_pass=1
 
 [db_replica]
-db-replica ansible_host=192.168.133.137 ansible_user=root ansible_password=1
+db-replica ansible_host=192.168.133.137 ansible_user=root ansible_ssh_pass=1
 
 [bot_server]
-bot-server ansible_host=192.168.133.138 ansible_user=root ansible_password=1
+bot-server ansible_host=192.168.133.138 ansible_user=root ansible_ssh_pass=1
 
 [all:vars]
 ansible_python_interpreter=/usr/bin/python3

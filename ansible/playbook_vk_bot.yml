@@ -3,7 +3,7 @@
   hosts: db_master
   become: yes
   vars:
-    pg_version: "14"
+    pg_version: "17"
     db_name: "mydb"
     db_user: "db_admin"
     db_password: "db_admin_password"
@@ -12,31 +12,84 @@
     listen_addresses: "*"
 
   tasks:
-    - name: Установка необходимых пакетов
+    - name: Установка базовых пакетов (неинтерактивно)
       apt:
-        name: [gnupg, wget, curl, ca-certificates, sudo]
+        name:
+          - gnupg
+          - wget
+          - curl
+          - ca-certificates
+          - sudo
+          - python3-psycopg2
         state: present
         update_cache: yes
+        cache_valid_time: 3600
+      environment:
+        DEBIAN_FRONTEND: noninteractive
 
     - name: Добавление репозитория PostgreSQL
-      shell: |
-        echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list
-        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
-      args:
-        creates: /etc/apt/sources.list.d/pgdg.list
+      block:
+        - name: Проверка наличия файла репозитория
+          stat:
+            path: /etc/apt/sources.list.d/pgdg.list
+          register: pgdg_file
 
-    - name: Установка PostgreSQL
+        - name: Получение ключа и сохранение в trusted.gpg.d
+          get_url:
+            url: "https://www.postgresql.org/media/keys/ACCC4CF8.asc"
+            dest: /usr/share/keyrings/postgresql-archive-keyring.gpg
+            mode: '0644'
+          when: not pgdg_file.stat.exists
+
+        - name: Запись строки репозитория с указанием keyring
+          copy:
+            content: |
+              deb [signed-by=/usr/share/keyrings/postgresql-archive-keyring.gpg] http://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main
+            dest: /etc/apt/sources.list.d/pgdg.list
+            mode: '0644'
+            force: no
+          when: not pgdg_file.stat.exists
+      rescue:
+        - debug:
+            msg: "Ошибка при настройке репозитория PostgreSQL: {{ ansible_failed_result }}"
+        - fail:
+            msg: "Не удалось настроить репозиторий PostgreSQL"
+
+    - name: Обновление кэша и установка PostgreSQL
       apt:
         name:
           - "postgresql-{{ pg_version }}"
           - "postgresql-client-{{ pg_version }}"
         state: present
         update_cache: yes
+        cache_valid_time: 1800
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Проверка существования кластера PostgreSQL
+      stat:
+        path: "/var/lib/postgresql/{{ pg_version }}/main/PG_VERSION"
+      register: pg_cluster
+
+    - name: Удаление старого кластера если есть только конфиг но нет данных
+      command: "pg_dropcluster {{ pg_version }} main --stop"
+      when: not pg_cluster.stat.exists
+      ignore_errors: yes
+
+    - name: Создание нового кластера PostgreSQL
+      command: "pg_createcluster {{ pg_version }} main --start"
+      when: not pg_cluster.stat.exists
 
     - name: Остановка PostgreSQL для настройки
       systemd:
-        name: "postgresql"
+        name: "postgresql@{{ pg_version }}-main"
         state: stopped
+        daemon_reload: yes
+
+    - name: Удаление standby.signal если есть (чтобы не загрузился как реплика)
+      file:
+        path: "/var/lib/postgresql/{{ pg_version }}/main/standby.signal"
+        state: absent
 
     - name: Копирование конфигурации pg_hba.conf
       copy:
@@ -49,7 +102,7 @@
     - name: Настройка postgresql.conf для репликации
       lineinfile:
         path: "/etc/postgresql/{{ pg_version }}/main/postgresql.conf"
-        regexp: "^{{ item.key }}"
+        regexp: "^{{ item.key }}\\s*="
         line: "{{ item.key }} = '{{ item.value }}'"
         state: present
       loop:
@@ -61,16 +114,18 @@
 
     - name: Запуск PostgreSQL
       systemd:
-        name: "postgresql"
+        name: "postgresql@{{ pg_version }}-main"
         state: started
         enabled: yes
+        daemon_reload: yes
 
     - name: Ожидание готовности PostgreSQL
       wait_for:
         port: 5432
         host: localhost
         delay: 5
-        timeout: 30
+        timeout: 60
+        connect_timeout: 10
 
     - name: Создание пользователя БД
       become_user: postgres
@@ -113,61 +168,122 @@
 
     - name: Инициализация таблиц и данных
       become_user: postgres
-      shell: "psql -f /tmp/init_db.sql"
+      command: psql -f /tmp/init_db.sql
+      args:
+        chdir: /tmp
       ignore_errors: yes
 
     - name: Перезапуск PostgreSQL для применения настроек репликации
       systemd:
-        name: "postgresql"
+        name: "postgresql@{{ pg_version }}-main"
         state: restarted
+        daemon_reload: yes
 
     - name: Повторное ожидание готовности PostgreSQL
       wait_for:
         port: 5432
         host: localhost
         delay: 5
-        timeout: 30
+        timeout: 60
+        connect_timeout: 10
+
 
 - name: Развертывание PostgreSQL Replica
   hosts: db_replica
   become: yes
   vars:
-    pg_version: "14"
+    pg_version: "17"
     master_host: "192.168.133.135"
     repl_user: "repl_user"
     repl_password: "repl_password"
 
   tasks:
-    - name: Установка необходимых пакетов
+    - name: Установка базовых пакетов (неинтерактивно)
       apt:
-        name: [gnupg, wget, curl, ca-certificates, sudo]
+        name:
+          - gnupg
+          - wget
+          - curl
+          - ca-certificates
+          - sudo
+          - python3-psycopg2
         state: present
         update_cache: yes
+        cache_valid_time: 3600
+      environment:
+        DEBIAN_FRONTEND: noninteractive
 
     - name: Добавление репозитория PostgreSQL
-      shell: |
-        echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list
-        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
-      args:
-        creates: /etc/apt/sources.list.d/pgdg.list
+      block:
+        - name: Проверка наличия файла репозитория
+          stat:
+            path: /etc/apt/sources.list.d/pgdg.list
+          register: pgdg_file
 
-    - name: Установка PostgreSQL
+        - name: Получение ключа и сохранение в trusted.gpg.d
+          get_url:
+            url: "https://www.postgresql.org/media/keys/ACCC4CF8.asc"
+            dest: /usr/share/keyrings/postgresql-archive-keyring.gpg
+            mode: '0644'
+          when: not pgdg_file.stat.exists
+
+        - name: Запись строки репозитория с указанием keyring
+          copy:
+            content: |
+              deb [signed-by=/usr/share/keyrings/postgresql-archive-keyring.gpg] http://apt.postgresql.org/pub/repos/apt {{ ansible_distribution_release }}-pgdg main
+            dest: /etc/apt/sources.list.d/pgdg.list
+            mode: '0644'
+            force: no
+          when: not pgdg_file.stat.exists
+      rescue:
+        - debug:
+            msg: "Ошибка при настройке репозитория PostgreSQL на реплике"
+        - fail:
+            msg: "Не удалось настроить репозиторий PostgreSQL на реплике"
+
+    - name: Обновление кэша и установка PostgreSQL
       apt:
         name:
           - "postgresql-{{ pg_version }}"
           - "postgresql-client-{{ pg_version }}"
         state: present
         update_cache: yes
+        cache_valid_time: 1800
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Проверка существования кластера PostgreSQL
+      stat:
+        path: "/var/lib/postgresql/{{ pg_version }}/main/PG_VERSION"
+      register: pg_cluster_replica
+
+    - name: Удаление старого кластера если есть только конфиг но нет данных
+      command: "pg_dropcluster {{ pg_version }} main --stop"
+      when: not pg_cluster_replica.stat.exists
+      ignore_errors: yes
+
+    - name: Создание нового кластера PostgreSQL
+      command: "pg_createcluster {{ pg_version }} main --start"
+      when: not pg_cluster_replica.stat.exists
 
     - name: Остановка PostgreSQL
       systemd:
-        name: "postgresql"
+        name: "postgresql@{{ pg_version }}-main"
         state: stopped
+        daemon_reload: yes
 
     - name: Очистка данных PostgreSQL
       file:
         path: "/var/lib/postgresql/{{ pg_version }}/main"
         state: absent
+
+    - name: Создание чистой директории данных
+      file:
+        path: "/var/lib/postgresql/{{ pg_version }}/main"
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: '0700'
 
     - name: Проверка доступности мастера
       wait_for:
@@ -175,13 +291,24 @@
         host: "{{ master_host }}"
         delay: 5
         timeout: 60
+        connect_timeout: 10
+
+    - name: Удаление старого слота репликации
+      become_user: postgres
+      command: "psql -h {{ master_host }} -U {{ repl_user }} -d mydb -c \"SELECT pg_drop_replication_slot('replica_slot');\""
+      environment:
+        PGPASSWORD: "{{ repl_password }}"
+      ignore_errors: yes
 
     - name: Создание резервной копии с мастера
       become_user: postgres
       environment:
         PGPASSWORD: "{{ repl_password }}"
-      shell: |
-        pg_basebackup -h {{ master_host }} -D /var/lib/postgresql/{{ pg_version }}/main -U {{ repl_user }} -P -R --slot=replica_slot -C
+      command: >
+        pg_basebackup -h {{ master_host }}
+        -D /var/lib/postgresql/{{ pg_version }}/main
+        -U {{ repl_user }}
+        -P -R --slot=replica_slot -C --no-password
       args:
         creates: "/var/lib/postgresql/{{ pg_version }}/main/PG_VERSION"
 
@@ -196,25 +323,27 @@
     - name: Настройка hot_standby на реплике
       lineinfile:
         path: "/etc/postgresql/{{ pg_version }}/main/postgresql.conf"
-        regexp: "^hot_standby"
+        regexp: "^hot_standby\\s*="
         line: "hot_standby = on"
         state: present
 
     - name: Запуск PostgreSQL на реплике
       systemd:
-        name: "postgresql"
+        name: "postgresql@{{ pg_version }}-main"
         state: started
         enabled: yes
+        daemon_reload: yes
 
     - name: Проверка статуса репликации
       become_user: postgres
-      shell: "psql -c 'SELECT pg_is_in_recovery();'"
+      command: "psql -c 'SELECT pg_is_in_recovery();'"
       register: replica_status
       ignore_errors: yes
 
     - name: Вывод статуса репликации
       debug:
         msg: "Статус репликации: {{ replica_status.stdout }}"
+
 
 - name: Настройка сервера бота
   hosts: bot_server
@@ -238,7 +367,13 @@
     rm_password: "1"
 
   tasks:
-    - name: Установка необходимых пакетов
+    - name: Удаление заблокированных репозиториев
+      shell: |
+        rm -f /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/*docker*
+        apt update 2>&1 | tail -3
+      ignore_errors: yes
+
+    - name: Установка необходимых пакетов (неинтерактивно)
       apt:
         name:
           - python3
@@ -251,6 +386,9 @@
           - procps
         state: present
         update_cache: yes
+        cache_valid_time: 3600
+      environment:
+        DEBIAN_FRONTEND: noninteractive
 
     - name: Клонирование репозитория с GitHub
       git:
@@ -269,15 +407,21 @@
       debug:
         msg: "{% if repo_check.stat.exists %}Репозиторий успешно склонирован{% else %}ОШИБКА: Репозиторий не склонирован!{% endif %}"
 
+    - name: Копирование .env с управляющей машины
+      copy:
+        src: ../.env
+        dest: "{{ bot_dir }}/.env"
+        mode: '0644'
+
     - name: Чтение VK_TOKEN из .env
       shell: "grep VK_TOKEN {{ bot_dir }}/.env | cut -d '=' -f2"
       register: vk_token_raw
-      when: repo_check.stat.exists
+      changed_when: false
 
     - name: Чтение GROUP_ID из .env
       shell: "grep GROUP_ID {{ bot_dir }}/.env | cut -d '=' -f2"
       register: group_id_raw
-      when: repo_check.stat.exists
+      changed_when: false
 
     - name: Создание виртуального окружения Python
       command: python3 -m venv {{ bot_dir }}/venv
@@ -294,7 +438,6 @@
       pip:
         requirements: "{{ bot_dir }}/bot/requirements.txt"
         virtualenv: "{{ bot_dir }}/venv"
-      when: repo_check.stat.exists
 
     - name: Создание директории для логов
       file:
@@ -302,7 +445,7 @@
         state: directory
         mode: '0755'
 
-    - name: Создание .env файла с настройками
+    - name: Создание .env файла с настройками для бота
       copy:
         content: |
           VK_TOKEN={{ vk_token_raw.stdout | trim }}
@@ -322,7 +465,6 @@
           RM_PASSWORD={{ rm_password }}
         dest: "{{ bot_dir }}/bot/.env"
         mode: '0600'
-      when: repo_check.stat.exists
 
     - name: Создание systemd-сервиса для VK бота
       copy:
@@ -340,7 +482,9 @@
           Environment=PYTHONUNBUFFERED=1
           Environment=HOME=/root
           ExecStart={{ bot_dir }}/venv/bin/python {{ bot_dir }}/bot/bot.py
-          Restart=always
+          ExecStop=/bin/kill -9 $MAINPID
+          KillMode=control-group
+          Restart=on-failure
           RestartSec=10
           StandardOutput=append:{{ bot_dir }}/bot/logs/bot_stdout.log
           StandardError=append:{{ bot_dir }}/bot/logs/bot_stderr.log
