@@ -93,21 +93,61 @@ class SSHClient:
     def get_services(self): return "🐳 Docker контейнер (systemctl недоступен)"
 
     def get_replication_logs(self):
-        output = "📋 Статус репликации PostgreSQL:\n\n"
+        output = "📋 Логи репликации PostgreSQL:\n\n"
+        
+        import subprocess
+        try:
+            logs = subprocess.run(
+                ['docker', 'logs', 'db_main_container'], 
+                capture_output=True, text=True, timeout=10
+            )
+            if logs.stdout:
+                lines = logs.stdout.split('\n')
+                
+                startup_lines = []
+                repl_lines = []
+                checkpoint_lines = []
+                other_lines = []
+                
+                for line in lines:
+                    lower = line.lower()
+                    if 'database system' in lower:
+                        startup_lines.append(line)
+                    elif any(w in lower for w in ['replication', 'walsender', 'standby', 'wal receiver', 'start_replication']):
+                        repl_lines.append(line)
+                    elif 'checkpoint' in lower:
+                        checkpoint_lines.append(line)
+                    elif any(w in lower for w in ['shut down', 'ready to accept', 'automatic recovery', 'interrupted']):
+                        other_lines.append(line)
+                
+                if startup_lines:
+                    output += "🟢 ЗАПУСК И СТАТУС СИСТЕМЫ:\n"
+                    output += "\n".join(startup_lines[-20:]) + "\n\n"
+                
+                if repl_lines:
+                    output += "🔄 ОПЕРАЦИИ РЕПЛИКАЦИИ:\n"
+                    output += "\n".join(repl_lines[-20:]) + "\n\n"
+                
+                if checkpoint_lines:
+                    output += "💾 КОНТРОЛЬНЫЕ ТОЧКИ:\n"
+                    output += "\n".join(checkpoint_lines[-20:]) + "\n\n"
+                
+                if other_lines:
+                    output += "📌 ДРУГИЕ СОБЫТИЯ:\n"
+                    output += "\n".join(other_lines[-20:]) + "\n\n"
+        except Exception as e:
+            output += f"Не удалось получить логи контейнера: {e}\n\n"
+        
         sql1 = "SELECT usename, application_name, client_addr, state, sync_state, pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) as lag_bytes FROM pg_stat_replication;"
         result1 = self.execute_db_command(sql1)
-        sql2 = "SELECT slot_name, slot_type, active, restart_lsn FROM pg_replication_slots;"
+        if result1 and result1.strip() and "(нет данных)" not in result1:
+            output += f"🔄 Активные подключения:\n{result1}\n"
+        
+        sql2 = "SELECT slot_name, slot_type, active FROM pg_replication_slots;"
         result2 = self.execute_db_command(sql2)
-        sql3 = "SELECT pg_current_wal_lsn() as current_wal, pg_last_wal_receive_lsn() as last_receive, pg_last_wal_replay_lsn() as last_replay;"
-        result3 = self.execute_db_command(sql3)
-        if result1 and result1.strip():
-            output += f"🔄 Активные подключения:\n{result1}\n\n"
-        else:
-            output += "🔄 Нет активных подключений.\n\n"
-        if result2 and result2.strip():
-            output += f"🔌 Слоты репликации:\n{result2}\n\n"
-        if result3 and result3.strip():
-            output += f"📊 WAL позиции:\n{result3}\n\n"
+        if result2 and result2.strip() and "(нет данных)" not in result2:
+            output += f"🔌 Слоты репликации:\n{result2}\n"
+        
         return output
 
     def get_emails_from_db(self): return self.execute_db_command("SELECT ID, Email FROM EMAIL ORDER BY ID DESC;")
