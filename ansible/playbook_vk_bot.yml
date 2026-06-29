@@ -221,10 +221,8 @@
   become: yes
   vars:
     repo_url: "https://github.com/SkylineRozan/devops_bot.git"
-    branch: "ansible"
+    branch: "docker"
     bot_dir: "/opt/vk_bot"
-    vk_token: "{{ lookup('env', 'VK_TOKEN') }}"
-    group_id: "{{ lookup('env', 'GROUP_ID') }}"
     db_host: "192.168.133.135"
     db_port: "5432"
     db_name: "mydb"
@@ -237,7 +235,7 @@
     rm_host: "192.168.133.135"
     rm_port: "22"
     rm_user: "root"
-    rm_password: "your_ssh_password"
+    rm_password: "1"
 
   tasks:
     - name: Установка необходимых пакетов
@@ -271,6 +269,16 @@
       debug:
         msg: "{% if repo_check.stat.exists %}Репозиторий успешно склонирован{% else %}ОШИБКА: Репозиторий не склонирован!{% endif %}"
 
+    - name: Чтение VK_TOKEN из .env
+      shell: "grep VK_TOKEN {{ bot_dir }}/.env | cut -d '=' -f2"
+      register: vk_token_raw
+      when: repo_check.stat.exists
+
+    - name: Чтение GROUP_ID из .env
+      shell: "grep GROUP_ID {{ bot_dir }}/.env | cut -d '=' -f2"
+      register: group_id_raw
+      when: repo_check.stat.exists
+
     - name: Создание виртуального окружения Python
       command: python3 -m venv {{ bot_dir }}/venv
       args:
@@ -297,8 +305,8 @@
     - name: Создание .env файла с настройками
       copy:
         content: |
-          VK_TOKEN={{ vk_token }}
-          GROUP_ID={{ group_id }}
+          VK_TOKEN={{ vk_token_raw.stdout | trim }}
+          GROUP_ID={{ group_id_raw.stdout | trim }}
           DB_HOST={{ db_host }}
           DB_PORT={{ db_port }}
           DB_DATABASE={{ db_name }}
@@ -314,6 +322,7 @@
           RM_PASSWORD={{ rm_password }}
         dest: "{{ bot_dir }}/bot/.env"
         mode: '0600'
+      when: repo_check.stat.exists
 
     - name: Создание systemd-сервиса для VK бота
       copy:
